@@ -1,3 +1,19 @@
+## Changes compared to upstream
+
+This patch adds a query param to download arbitrary folder from github. For example:
+
+
+<https://arogozhnikov.github.io/jupyterlite/lab/index.html?download_github_folder=arogozhnikov/einops/docs>
+
+This downloads folder `docs` from github repo `arogozhnikov/einops` after user downloads the page.
+
+Documentation lives still in the main repo, but can also be served with jupyterlite. Nice!
+
+
+
+---
+
+
 # JupyterLite
 
 [![ci-badge]][ci] [![lite-badge]][lite] [![docs-badge]][docs] [![zulip-badge]][zulip]
