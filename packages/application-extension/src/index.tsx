@@ -821,6 +821,183 @@ const modeSupport: JupyterFrontEndPlugin<void> = {
   },
 };
 
+/**
+ * Helper to recursively fetch a GitHub folder and write files to the contents service.
+ */
+async function fetchAndWriteGitHubFolder(
+  contents: Contents.IManager,
+  owner: string,
+  repo: string,
+  path: string,
+  ref: string,
+  localPrefix: string,
+): Promise<void> {
+  const apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${path}?ref=${ref}`;
+  const response = await fetch(apiUrl, {
+    headers: { Accept: 'application/vnd.github.v3+json' },
+  });
+  if (!response.ok) {
+    console.error(
+      `Failed to fetch ${apiUrl}: ${response.status} ${response.statusText}`,
+    );
+    return;
+  }
+  const items = await response.json();
+  // The API returns a single object for files and an array for directories
+  const entries = Array.isArray(items) ? items : [items];
+
+  for (const item of entries) {
+    const localPath = localPrefix ? `${localPrefix}/${item.name}` : item.name;
+    if (item.type === 'dir') {
+      // Ensure directory exists
+      try {
+        await contents.save(localPath, {
+          type: 'directory',
+          name: item.name,
+        });
+      } catch {
+        // directory may already exist
+      }
+      // Recurse into subdirectory
+      await fetchAndWriteGitHubFolder(
+        contents,
+        owner,
+        repo,
+        item.path,
+        ref,
+        localPath,
+      );
+    } else if (item.type === 'file') {
+      // Fetch file content
+      const fileResponse = await fetch(item.download_url);
+      if (!fileResponse.ok) {
+        console.warn(`Failed to download ${item.download_url}`);
+        continue;
+      }
+      // Determine format based on file type
+      const name = item.name as string;
+      const isNotebook = name.endsWith('.ipynb');
+      const isTextLike =
+        name.endsWith('.py') ||
+        name.endsWith('.md') ||
+        name.endsWith('.markdown') ||
+        name.endsWith('.txt') ||
+        name.endsWith('.json') ||
+        name.endsWith('.csv') ||
+        name.endsWith('.yml') ||
+        name.endsWith('.yaml') ||
+        name.endsWith('.toml') ||
+        name.endsWith('.ini') ||
+        name.endsWith('.cfg') ||
+        name.endsWith('.sh') ||
+        name.endsWith('.r') ||
+        name.endsWith('.R') ||
+        name.endsWith('.js') ||
+        name.endsWith('.ts') ||
+        name.endsWith('.html') ||
+        name.endsWith('.css') ||
+        name.endsWith('.xml') ||
+        name.endsWith('.tex') ||
+        name.endsWith('.rst');
+
+      if (isNotebook) {
+        const notebookContent = await fileResponse.json();
+        await contents.save(localPath, {
+          type: 'notebook',
+          format: 'json',
+          content: notebookContent,
+        });
+      } else if (isTextLike) {
+        const text = await fileResponse.text();
+        await contents.save(localPath, {
+          type: 'file',
+          format: 'text',
+          content: text,
+        });
+      } else {
+        // Binary file — read as base64
+        const blob = await fileResponse.blob();
+        const base64 = await new Promise<string>((resolve) => {
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            const dataUrl = reader.result as string;
+            resolve(dataUrl.split(',')[1]);
+          };
+          reader.readAsDataURL(blob);
+        });
+        await contents.save(localPath, {
+          type: 'file',
+          format: 'base64',
+          content: base64,
+        });
+      }
+    }
+  }
+}
+
+/**
+ * A plugin to download a GitHub folder via URL parameters.
+ *
+ * URL format: ?download_github_folder=owner/repo/path&ref=branch
+ */
+const downloadGitHubFolder: JupyterFrontEndPlugin<void> = {
+  id: '@jupyterlite/application-extension:download-github-folder',
+  autoStart: true,
+  requires: [IRouter],
+  optional: [IDefaultFileBrowser],
+  activate: (
+    app: JupyterFrontEnd,
+    router: IRouter,
+    fileBrowser: IDefaultFileBrowser | null,
+  ) => {
+    const command = 'router:download-github-folder';
+    app.commands.addCommand(command, {
+      execute: async (args: any) => {
+        const parsed = args as IRouter.ILocation;
+        const urlParams = new URLSearchParams(parsed.search);
+        const ghFolder = urlParams.get('download_github_folder');
+        if (!ghFolder) {
+          return;
+        }
+
+        const ref = urlParams.get('ref') ?? 'main';
+        // Parse "owner/repo/path/to/folder"
+        const parts = ghFolder.split('/');
+        if (parts.length < 2) {
+          console.error(
+            'download_github_folder must be in format: owner/repo[/path]',
+          );
+          return;
+        }
+        const owner = parts[0];
+        const repo = parts[1];
+        const path = parts.slice(2).join('/');
+
+        console.log(
+          `Downloading GitHub folder: ${owner}/${repo}/${path} (ref: ${ref})`,
+        );
+
+        const { contents } = app.serviceManager;
+        await fetchAndWriteGitHubFolder(contents, owner, repo, path, ref, '');
+
+        // Refresh file browser if available
+        if (fileBrowser) {
+          await fileBrowser.model.refresh();
+        }
+
+        // Clean the download params from the URL
+        const url = new URL(window.location.href);
+        url.searchParams.delete('download_github_folder');
+        url.searchParams.delete('ref');
+        const { pathname, search } = url;
+        router.navigate(`${pathname}${search}`, { skipRouting: true });
+      },
+    });
+
+    router.register({ command, pattern: URL_PATTERN });
+  },
+};
+
 const plugins: JupyterFrontEndPlugin<any>[] = [
   about,
   clearBrowserData,
@@ -835,6 +1012,8 @@ const plugins: JupyterFrontEndPlugin<any>[] = [
   serviceWorkerManagerPlugin,
   sessionContextPatch,
   shareFile,
+  downloadGitHubFolder,
 ];
 
 export default plugins;
+
